@@ -1,12 +1,14 @@
 import argparse
+import time
 import cv2
-import mediapipe as mp
+import numpy as np
 
 from .camera import open_camera, print_camera_list
+from .haar_5pt import Haar5ptDetector
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MediaPipe Face Detection")
+    parser = argparse.ArgumentParser(description="5-Point Landmark Face Detection")
     parser.add_argument("--cam", default="auto", help="Camera index or 'auto' for physical external camera")
     parser.add_argument("--list-cams", action="store_true", help="List detected cameras and exit")
     args = parser.parse_args()
@@ -15,50 +17,62 @@ def main():
         print_camera_list()
         return
 
-    # Initialize MediaPipe Face Detection
-    mp_face_detection = mp.solutions.face_detection
-    mp_drawing = mp.solutions.drawing_utils
-
-    face_detection = mp_face_detection.FaceDetection(
-        model_selection=0,
-        min_detection_confidence=0.5
-    )
+    # Initialize 5-point Face Detector
+    detector = Haar5ptDetector(debug=True)
 
     # Open physical camera by default
     camera = open_camera(args.cam)
 
-    print("Face detection started.")
+    print(f"Face detection started (Backend: {detector.backend}).")
     print("Press Q to quit.")
+
+    t_prev = time.time()
+    fps = 0.0
 
     while True:
         success, frame = camera.read()
-
         if not success or frame is None:
             print("ERROR: Could not read frame.")
             break
 
-        # OpenCV uses BGR; MediaPipe expects RGB
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        now = time.time()
+        fps = 0.9 * fps + 0.1 * (1.0 / max(1e-5, now - t_prev))
+        t_prev = now
 
-        # Detect faces
-        results = face_detection.process(rgb_frame)
+        faces = detector.detect(frame, max_faces=5)
 
-        # Draw detection boxes
-        if results.detections:
-            for detection in results.detections:
-                mp_drawing.draw_detection(frame, detection)
+        vis = frame.copy()
+        for face in faces:
+            # Draw bounding box
+            cv2.rectangle(vis, (face.x1, face.y1), (face.x2, face.y2), (0, 255, 0), 2)
 
-        # Display result
-        cv2.imshow("Face Detection", frame)
+            # Draw 5 facial landmarks
+            colors = [
+                (255, 0, 0),    # Left eye - Blue
+                (0, 0, 255),    # Right eye - Red
+                (0, 255, 255),  # Nose - Yellow
+                (255, 0, 255),  # Left mouth - Magenta
+                (255, 255, 0),  # Right mouth - Cyan
+            ]
+            labels = ["L-Eye", "R-Eye", "Nose", "L-Mouth", "R-Mouth"]
+            for idx, (px, py) in enumerate(face.kps):
+                pt = (int(px), int(py))
+                color = colors[idx % len(colors)]
+                cv2.circle(vis, pt, 4, color, -1)
+                cv2.circle(vis, pt, 5, (255, 255, 255), 1)
 
-        # Press Q to quit
+        # Status text
+        backend_str = f"Backend: {detector.backend} | Faces: {len(faces)} | FPS: {fps:.1f}"
+        cv2.putText(vis, backend_str, (16, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        cv2.putText(vis, "Press 'Q' to quit", (16, frame.shape[0] - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+
+        cv2.imshow("5-Point Landmark Face Detection", vis)
+
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
     camera.release()
-    face_detection.close()
     cv2.destroyAllWindows()
-
     print("Face detection stopped.")
 
 

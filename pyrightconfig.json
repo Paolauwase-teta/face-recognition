@@ -1,0 +1,18 @@
+{
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "**/__pyrefly_virtual__/**",
+    "**/__pycache__/**"
+  ],
+  "ignore": [
+    "**/__pyrefly_virtual__/**"
+  ],
+  "extraPaths": [
+    "C:/Users/user/AppData/Roaming/Python/Python313/site-packages",
+    "."
+  ],
+  "pythonVersion": "3.13",
+  "pythonPlatform": "Windows"
+}

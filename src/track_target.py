@@ -80,6 +80,9 @@ def main(
     udp_port: int = 8888,
     invert: bool = False,
     fov: float = DEFAULT_CAMERA_FOV,
+    hardware_mode: int = 1,
+    initial_gain: float = 1.5,
+    max_step: float = 6.0,
 ):
     target_emb = load_target_embedding(target_name)
     print(f"\n[Target Tracker] Loaded enrolled target: '{target_name}'")
@@ -114,11 +117,11 @@ def main(
     print("=" * 65)
     print("Controls:")
     print("  'I'       : Invert Pan Direction (Flip if motor pans opposite)")
-    print("  'M'       : Toggle Mode (1 = Camera on Servo, 2 = Fixed Camera Pointer)")
+    print("  'M'       : Toggle Rig Mode (1 = Camera on Servo, 2 = Fixed Camera Pointer)")
     print("  'R'       : Recenter Servo (90 deg)")
-    print("  '1'       : Instant Direct 1-to-1 Mode (Max accuracy)")
+    print("  '1'       : Instant Direct 1-to-1 Mode (Max speed & responsiveness)")
     print("  '2'       : Smooth Cinematic Mode")
-    print("  '+' / '-' : Fine-tune sensitivity")
+    print("  '+' / '-' : Increase / Decrease Sensitivity and Speed")
     print("  SPACE     : Pause / Resume Tracking")
     print("  'Q'       : Quit")
     print("=" * 65 + "\n")
@@ -126,10 +129,9 @@ def main(
     servo_angle = 90.0
     filtered_angle = 90.0
     last_sent_angle = 90
-    hardware_mode = 1  # 1 = Camera Mounted on Servo, 2 = Fixed Camera (Desk Pointer)
     tracking_enabled = True
     invert_direction = invert
-    gain = 1.0
+    gain = initial_gain
     tracking_mode = 1  # 1 = Instant 1-to-1, 2 = Smooth Cinematic
     half_fov = fov / 2.0
 
@@ -138,16 +140,23 @@ def main(
     last_seen_time = 0.0
     prev_angle_deg = 0.0
 
+    # Verification Cache for 30+ FPS tracking
+    target_locked = False
+    locked_center = None
+    frames_since_verify = 0
+    frame_count = 0
+
     # Initialize servo to 90 degrees center
     if ser:
         ser.write(b"90\n")
-        ser.flush()
 
     while True:
         ok, frame = cap.read()
         if not ok or frame is None:
             break
 
+        frame_count += 1
+        now = time.time()
         H, W = frame.shape[:2]
         center_x = W / 2.0
         center_y = H / 2.0
@@ -156,26 +165,52 @@ def main(
 
         best_dist = None
         target_box = None
-        now = time.time()
 
-        for f in faces:
-            aligned, _ = align_face_5pt(frame, f.kps, out_size=(112, 112))
-            if aligned is None or not aligned.size:
-                continue
+        # Fast Face Tracking: If target was locked in recent frames, track position with YuNet (~30+ FPS)
+        if target_locked and locked_center is not None and frames_since_verify < 8 and len(faces) > 0:
+            best_face = None
+            min_dist_px = 9999.0
+            for f in faces:
+                fx = (f.x1 + f.x2) / 2.0
+                fy = (f.y1 + f.y2) / 2.0
+                dist_px = ((fx - locked_center[0]) ** 2 + (fy - locked_center[1]) ** 2) ** 0.5
+                if dist_px < min_dist_px and dist_px < (W * 0.35):
+                    min_dist_px = dist_px
+                    best_face = f
 
-            result = embedder.embed(aligned)
-            dist = cosine_distance(result.embedding, target_emb)
+            if best_face is not None:
+                target_box = best_face
+                frames_since_verify += 1
+                cv2.rectangle(frame, (best_face.x1, best_face.y1), (best_face.x2, best_face.y2), (0, 255, 0), 2)
+                cv2.putText(frame, f"{target_name} [LOCKED]", (best_face.x1, best_face.y1 - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
 
-            is_target = dist < MATCH_THRESHOLD
-            color = (0, 255, 0) if is_target else (75, 75, 75)
+        # Full Verification with ArcFace (runs periodically or when acquiring target)
+        if target_box is None:
+            for f in faces:
+                aligned, _ = align_face_5pt(frame, f.kps, out_size=(112, 112))
+                if aligned is None or not aligned.size:
+                    continue
 
-            cv2.rectangle(frame, (f.x1, f.y1), (f.x2, f.y2), color, 2)
-            label = f"{target_name} ({1.0 - dist:.2f})" if is_target else f"Stranger ({1.0 - dist:.2f})"
-            cv2.putText(frame, label, (f.x1, f.y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+                result = embedder.embed(aligned)
+                dist = cosine_distance(result.embedding, target_emb)
 
-            if is_target and (best_dist is None or dist < best_dist):
-                best_dist = dist
-                target_box = f
+                is_target = dist < MATCH_THRESHOLD
+                color = (0, 255, 0) if is_target else (75, 75, 75)
+
+                cv2.rectangle(frame, (f.x1, f.y1), (f.x2, f.y2), color, 2)
+                label = f"{target_name} ({1.0 - dist:.2f})" if is_target else f"Stranger ({1.0 - dist:.2f})"
+                cv2.putText(frame, label, (f.x1, f.y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+
+                if is_target and (best_dist is None or dist < best_dist):
+                    best_dist = dist
+                    target_box = f
+
+            if target_box is not None:
+                target_locked = True
+                frames_since_verify = 0
+            else:
+                target_locked = False
 
         direction_label = "SEARCHING..."
         offset_px = 0.0
@@ -194,6 +229,8 @@ def main(
                 face_center_x = (target_box.x1 + target_box.x2) / 2.0
                 face_center_y = (target_box.y1 + target_box.y2) / 2.0
 
+            locked_center = (face_center_x, face_center_y)
+
             # Pixel offset from optical center
             offset_px = face_center_x - center_x
             
@@ -206,28 +243,27 @@ def main(
             if tracking_enabled:
                 # Tracking Mode Logic:
                 # hardware_mode 1: Mounted Camera (Pan base - closed-loop centering)
-                # hardware_mode 2: Fixed Camera (Camera on monitor, servo points at face)
+                # hardware_mode 2: Fixed Camera (Camera on monitor, servo points directly at face)
                 if hardware_mode == 2:
-                    # Absolute direct mapping: Face angle maps directly to servo pointing angle
+                    # Direct pointer mapping: Face angle directly drives servo pointing angle
                     sign = -1.0 if invert_direction else 1.0
                     target_angle = 90.0 + (sign * angle_error_deg * gain)
                     servo_angle = float(np.clip(target_angle, 15.0, 165.0))
                     
-                    if abs(norm_error) <= 0.06:
-                        direction_label = "CENTERED [LOCKED]"
+                    if abs(norm_error) <= 0.05:
+                        direction_label = "POINTING [CENTERED]"
                     else:
                         direction_label = "POINTING RIGHT ->" if (target_angle > 90) else "<- POINTING LEFT"
 
                 else:
-                    # Mounted Camera Mode: Smooth closed-loop recentering with comfortable deadzone
-                    # Deadzone of 7% (approx +-22px) keeps servo completely still when facing camera
-                    deadzone = 0.07 if (tracking_mode == 1) else 0.10
+                    # Mounted Camera Mode: Proportional tracking
+                    deadzone = 0.05 if (tracking_mode == 1) else 0.08
 
                     if abs(norm_error) > deadzone:
-                        # Smooth proportional adjustment
                         err_mag = abs(norm_error) - deadzone
-                        # Max step speed 1.8 deg/frame to prevent blurring and overshooting
-                        step = np.clip(err_mag * 18.0 * gain, 0.3, 1.8)
+                        # Proportional adjustment up to max_step * gain
+                        max_speed_cap = max_step * gain
+                        step = np.clip(err_mag * 35.0 * gain, 0.5, max_speed_cap)
                         step = -step if (norm_error < 0) else step
 
                         if invert_direction:
@@ -236,7 +272,6 @@ def main(
                         servo_angle = float(np.clip(servo_angle + step, 15.0, 165.0))
                         direction_label = "TRACKING RIGHT ->" if (step > 0) else "<- TRACKING LEFT"
                     else:
-                        # Inside deadzone: Keep servo stable and still!
                         direction_label = "CENTERED [STABLE]"
 
                 prev_angle_deg = angle_error_deg
@@ -247,28 +282,28 @@ def main(
             cv2.line(frame, (int(center_x), int(center_y)), (int(face_center_x), int(face_center_y)), (0, 255, 255), 2)
 
         else:
+            locked_center = None
             if now - last_seen_time > 1.2:
                 direction_label = "TARGET LOST"
             else:
                 direction_label = "HOLDING POSITION"
 
-        # Low-pass filter for smooth motion (alpha = 0.60 direct, 0.30 cinematic)
-        alpha = 0.60 if (tracking_mode == 1) else 0.30
+        # Smoothing: alpha = 0.85 in Direct mode for instant response, 0.40 in Cinematic
+        alpha = 0.85 if (tracking_mode == 1) else 0.40
         filtered_angle = (1.0 - alpha) * filtered_angle + alpha * servo_angle
 
-        # Anti-jitter drive to ESP8266: Only transmit when angle integer changes by >= 1 deg
+        # Anti-jitter drive to ESP8266: Transmit when angle integer changes by >= 1 deg
         new_int_angle = int(round(np.clip(filtered_angle, 15.0, 165.0)))
         if (ser or sock) and tracking_enabled:
             angle_delta = abs(new_int_angle - last_sent_angle)
             time_since_send = now - last_command_time
 
-            # Transmit if angle changed, or at least every 0.5s heartbeat
-            if (angle_delta >= 1 and time_since_send > 0.035) or (time_since_send > 0.5):
+            # Transmit if angle changed, or periodic heartbeat
+            if (angle_delta >= 1 and time_since_send > 0.025) or (time_since_send > 0.4):
                 cmd_bytes = f"{new_int_angle}\n".encode("ascii")
 
                 if ser:
                     ser.write(cmd_bytes)
-                    ser.flush()
 
                 if sock and ip:
                     try:
@@ -282,8 +317,7 @@ def main(
         if now - last_print_time > 0.25:
             hw_str = "MOUNTED CAM" if (hardware_mode == 1) else "FIXED CAM POINTER"
             err_str = f"{angle_error_deg:+5.1f} deg ({offset_px:+4.0f}px)" if target_box is not None else "        N/A       "
-            dest_str = f"Port: {serial_port}" if serial_port else ("IP: " + ip if ip else "No Link")
-            print(f"[Tracker] '{target_name}' [{direction_label:<18s}] Error: {err_str} | Servo: {new_int_angle:3d} deg | [{hw_str}]")
+            print(f"[Tracker] '{target_name}' [{direction_label:<19s}] Error: {err_str} | Servo: {new_int_angle:3d} deg | [{hw_str}] | Speed: {gain:.1f}x")
             last_print_time = now
 
         # Center crosshairs
@@ -292,7 +326,7 @@ def main(
 
         # On-screen HUD
         hw_str = "MOUNTED CAM" if (hardware_mode == 1) else "FIXED POINTER"
-        mode_str = "1-to-1 DIRECT" if (tracking_mode == 1) else "SMOOTH CINEMATIC"
+        mode_str = "FAST 1-TO-1" if (tracking_mode == 1) else "SMOOTH CINEMATIC"
         inv_str = "INVERTED" if invert_direction else "NORMAL"
 
         cv2.putText(frame, f"Target: {target_name} | [{direction_label}]", (15, 28),
@@ -301,7 +335,7 @@ def main(
         hud_line2 = f"Servo: {new_int_angle} deg | Offset: {angle_error_deg:+.1f} deg | Mode: {mode_str} [1/2]"
         cv2.putText(frame, hud_line2, (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 255, 255), 2)
 
-        hud_line3 = f"Rig: [{hw_str} - Key 'M'] | Dir: {inv_str} ['I'] | Gain: {gain:.1f}x [+/-]"
+        hud_line3 = f"Rig: [{hw_str} - Key 'M'] | Dir: {inv_str} ['I'] | Speed/Gain: {gain:.1f}x [+/-]"
         cv2.putText(frame, hud_line3, (15, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200, 200, 200), 1)
 
         if not tracking_enabled:
@@ -333,7 +367,6 @@ def main(
             filtered_angle = 90.0
             if ser:
                 ser.write(b"90\n")
-                ser.flush()
             if sock and ip:
                 try:
                     sock.sendto(b"90\n", (ip, udp_port))
@@ -342,16 +375,16 @@ def main(
             print("\n[Config] Servo reset to center (90 deg)\n")
         elif key == ord("1"):
             tracking_mode = 1
-            print("\n[Mode] Switched to: INSTANT 1-TO-1 DIRECT TRACKING\n")
+            print("\n[Mode] Switched to: FAST 1-TO-1 DIRECT TRACKING\n")
         elif key == ord("2"):
             tracking_mode = 2
             print("\n[Mode] Switched to: SMOOTH CINEMATIC MODE\n")
         elif key in (ord("+"), ord("=")):
-            gain = min(gain + 0.15, 3.0)
-            print(f"[Config] Gain/Sensitivity: {gain:.2f}x")
+            gain = min(gain + 0.25, 4.0)
+            print(f"[Config] Speed / Gain increased to: {gain:.2f}x")
         elif key in (ord("-"), ord("_")):
-            gain = max(gain - 0.15, 0.3)
-            print(f"[Config] Gain/Sensitivity: {gain:.2f}x")
+            gain = max(gain - 0.25, 0.4)
+            print(f"[Config] Speed / Gain decreased to: {gain:.2f}x")
         elif key == ord(" "):
             tracking_enabled = not tracking_enabled
             print(f"[Config] Tracking: {'RESUMED' if tracking_enabled else 'PAUSED'}")
@@ -359,7 +392,6 @@ def main(
     # Return to center on exit
     if ser:
         ser.write(b"90\n")
-        ser.flush()
         ser.close()
     if sock and ip:
         try:
@@ -375,13 +407,16 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="High-Accuracy 1-to-1 Horizontal Face Tracker")
-    parser.add_argument("--target", required=False, default=None, help="Enrolled target person name")
+    parser.add_argument("--target", required=False, default="Payola", help="Enrolled target person name (default: 'Payola')")
     parser.add_argument("--cam", default="auto", help="Camera index, 'auto' for physical external camera, or stream URL")
-    parser.add_argument("--port", type=str, default=None, help="Serial port (e.g. COM13)")
+    parser.add_argument("--port", type=str, default=None, help="Serial port (e.g. COM4)")
     parser.add_argument("--ip", type=str, default=None, help="ESP8266 WiFi IP address (e.g. 192.168.4.1 or 192.168.1.100)")
     parser.add_argument("--udp-port", type=int, default=8888, help="ESP8266 UDP port (default: 8888)")
     parser.add_argument("--invert", action="store_true", help="Invert servo panning direction")
     parser.add_argument("--fov", type=float, default=DEFAULT_CAMERA_FOV, help="Camera horizontal FOV in degrees (default: 65.0)")
+    parser.add_argument("--mode", type=int, choices=[1, 2], default=1, help="Hardware mode: 1 = Mounted Camera, 2 = Fixed Camera Pointer (default: 1)")
+    parser.add_argument("--gain", type=float, default=1.5, help="Tracking sensitivity/speed multiplier (default: 1.5)")
+    parser.add_argument("--max-step", type=float, default=6.0, help="Maximum servo turn degrees per frame (default: 6.0)")
     parser.add_argument("--list-cams", action="store_true", help="List detected cameras and exit")
     args = parser.parse_args()
 
@@ -390,4 +425,15 @@ if __name__ == "__main__":
     elif not args.target:
         parser.error("the following arguments are required: --target (unless --list-cams is specified)")
     else:
-        main(args.target, args.cam, serial_port=args.port, ip=args.ip, udp_port=args.udp_port, invert=args.invert, fov=args.fov)
+        main(
+            args.target,
+            args.cam,
+            serial_port=args.port,
+            ip=args.ip,
+            udp_port=args.udp_port,
+            invert=args.invert,
+            fov=args.fov,
+            hardware_mode=args.mode,
+            initial_gain=args.gain,
+            max_step=args.max_step,
+        )

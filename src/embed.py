@@ -38,10 +38,18 @@ class ArcFaceEmbedderONNX:
         self.model_path = Path(model_path)
 
         if not self.model_path.exists():
-            raise FileNotFoundError(
-                f"ArcFace ONNX model not found at '{model_path}'.\n"
-                "Please place 'embedder_arcface.onnx' in the models/ directory."
-            )
+            print(f"[embed] ArcFace model not found at '{model_path}'. Attempting automated download...")
+            try:
+                from .download_model import main as download_model_main
+                download_model_main()
+            except Exception as e:
+                print(f"[embed] Auto-download failed: {e}")
+
+            if not self.model_path.exists():
+                raise FileNotFoundError(
+                    f"ArcFace ONNX model not found at '{model_path}'.\n"
+                    "Please run `python -m src.download_model` or place 'embedder_arcface.onnx' in the models/ directory."
+                )
 
         # CPU Execution Provider
         self.sess = ort.InferenceSession(str(self.model_path), providers=["CPUExecutionProvider"])

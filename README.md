@@ -26,9 +26,10 @@ INDEX   | TYPE                 | DEVICE NAME
 ### Automatic Physical Camera Usage
 All entry points automatically select the physical camera by default (`--cam auto`):
 - **Camera Test / Live HUD**: `python -m src.camera`
-- **Face Detection**: `python -m src.detect`
-- **Target Face Enrollment**: `python -m src.enroll --name TargetName`
-- **Target Tracking & Servo Base**: `python -m src.track_target --target TargetName --port COM13`
+- **5-Point Face Detection**: `python -m src.detect`
+- **Target Face Enrollment (Live Webcam)**: `python -m src.enroll --name Payola`
+- **Target Face Enrollment (From Photos)**: `python -m src.enroll --name Payola --image-dir path/to/photos`
+- **Target Tracking & Servo Base**: `python -m src.track_target --target Payola --port COM4`
 
 ### Manual Camera Override
 If you want to manually specify a camera index or network stream:

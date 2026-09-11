@@ -55,7 +55,7 @@ def download_stream(url: str, dest: Path, desc: str = "Downloading") -> bool:
 
             # Check if complete
             if total_size > 0 and downloaded < total_size:
-                print(f"\n⚠️ Incomplete transfer ({downloaded}/{total_size} bytes). Retrying...")
+                print(f"\n[!] Incomplete transfer ({downloaded}/{total_size} bytes). Retrying...")
                 if temp_dest.exists():
                     temp_dest.unlink()
                 return False
@@ -64,21 +64,37 @@ def download_stream(url: str, dest: Path, desc: str = "Downloading") -> bool:
                 if dest.exists():
                     dest.unlink()
                 temp_dest.rename(dest)
-            print("\n✅ Download finished!")
+            print("\n[+] Download finished!")
             return True
 
     except Exception as e:
-        print(f"\n⚠️ Connection error on {url}: {e}")
+        print(f"\n[!] Connection error on {url}: {e}")
         if temp_dest.exists():
             temp_dest.unlink()
         return False
 
 
+def download_detector_models():
+    """Download YuNet face detection ONNX model and Haar cascade XML if missing."""
+    yunet_path = MODEL_DIR / "face_detection_yunet_2023mar.onnx"
+    yunet_url = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
+    if not yunet_path.exists():
+        print(f"\n[+] Downloading YuNet 5-point face detector model...")
+        download_stream(yunet_url, yunet_path, desc="Downloading YuNet")
+
+    haar_path = MODEL_DIR / "haarcascade_frontalface_default.xml"
+    haar_url = "https://raw.githubusercontent.com/opencv/opencv/4.x/data/haarcascades/haarcascade_frontalface_default.xml"
+    if not haar_path.exists():
+        print(f"\n[+] Downloading Haar cascade face detector fallback...")
+        download_stream(haar_url, haar_path, desc="Downloading Haar XML")
+
+
 def main():
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    download_detector_models()
 
     if TARGET_ONNX.exists() and TARGET_ONNX.stat().st_size > 100 * 1024 * 1024:
-        print(f"✅ ArcFace ONNX model already installed and verified at: {TARGET_ONNX.resolve()}")
+        print(f"[+] ArcFace ONNX model already installed and verified at: {TARGET_ONNX.resolve()}")
         return
 
     # Clean any corrupt previous zip
@@ -94,7 +110,7 @@ def main():
         print(f"\nAttempting direct model download from HuggingFace...")
         if download_stream(url, TARGET_ONNX, desc="Downloading ArcFace ONNX"):
             if TARGET_ONNX.exists() and TARGET_ONNX.stat().st_size > 50 * 1024 * 1024:
-                print(f"🎉 Successfully installed model to: {TARGET_ONNX}")
+                print(f"[+] Successfully installed model to: {TARGET_ONNX}")
                 return
 
     # Attempt 2: Zip package fallback
@@ -111,17 +127,17 @@ def main():
                     if TARGET_ONNX.exists():
                         TARGET_ONNX.unlink()
                     extracted.rename(TARGET_ONNX)
-                    print(f"🎉 Successfully installed model to: {TARGET_ONNX}")
+                    print(f"[+] Successfully installed model to: {TARGET_ONNX}")
                     if ZIP_PATH.exists():
                         ZIP_PATH.unlink()
                     return
             except zipfile.BadZipFile:
-                print("⚠️ Corrupt zip file. Removing...")
+                print("[!] Corrupt zip file. Removing...")
                 if ZIP_PATH.exists():
                     ZIP_PATH.unlink()
 
     print("\n" + "=" * 60)
-    print("⚠️ Automated download couldn't complete due to network timeout.")
+    print("[!] Automated download couldn't complete due to network timeout.")
     print("Please download directly via browser from one of these links:")
     print("  1) https://huggingface.co/public-data/insightface/resolve/main/models/buffalo_l/w600k_r50.onnx")
     print(f"  Save the downloaded file directly as: {TARGET_ONNX.resolve()}")
